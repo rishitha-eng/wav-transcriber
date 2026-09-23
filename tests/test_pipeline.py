@@ -11,6 +11,8 @@ import pytest
 from wav_transcriber.pipeline import (
     Turn,
     channels_are_separated,
+    decide_customer_speaker,
+    detect_bot_by_self_identification,
     export_speaker_chunks,
     fmt_time,
     group_by_speaker,
@@ -128,6 +130,104 @@ def test_translate_sentences_calls_model_with_correct_codes():
     assert result == ["translated-0", "translated-1"]
     assert fake_tokenizer.src_lang == "eng_Latn"
     assert fake_tokenizer.requested_bos_token == "hin_Deva"
+
+
+def test_detect_bot_by_self_identification_finds_clear_disclosure():
+    turns = [
+        Turn(speaker="SPEAKER_00", start=0.0, end=3.0,
+             text="Hi, it's Alex. I'm Alex, Heartland's virtual support assistant."),
+        Turn(speaker="SPEAKER_01", start=3.5, end=4.0, text="I'd like to speak to a team member."),
+    ]
+    assert detect_bot_by_self_identification(turns) == "SPEAKER_00"
+
+
+def test_detect_bot_by_self_identification_finds_hindi_disclosure():
+    # Real case (file 3): a Hindi bot ("Riya") self-identifies with "service
+    # champion" code-switched into English text — was missed entirely before this
+    # phrase was added, causing the classifier fallback to label the bot as the
+    # customer.
+    turns = [
+        Turn(speaker="SPEAKER_01", start=0.0, end=5.0,
+             text="Good Afternoon, मैं रिया हूं, आपकी service champion, आज मैं आपकी मदद करूँगी"),
+        Turn(speaker="SPEAKER_00", start=5.5, end=6.0, text="मुझे अपनी पॉलिसी चेक करनी है"),
+    ]
+    assert detect_bot_by_self_identification(turns) == "SPEAKER_01"
+
+
+def test_detect_bot_by_self_identification_none_when_nobody_discloses():
+    turns = [
+        Turn(speaker="SPEAKER_00", start=0.0, end=1.0, text="Hi there, how can I help?"),
+        Turn(speaker="SPEAKER_01", start=1.0, end=2.0, text="I have an issue with my order."),
+    ]
+    assert detect_bot_by_self_identification(turns) is None
+
+
+def test_detect_bot_by_self_identification_none_when_ambiguous():
+    turns = [
+        Turn(speaker="SPEAKER_00", start=0.0, end=1.0, text="I'm an AI assistant."),
+        Turn(speaker="SPEAKER_01", start=1.0, end=2.0, text="This is also a virtual agent."),
+    ]
+    assert detect_bot_by_self_identification(turns) is None
+
+
+def test_decide_customer_speaker_content_wins_even_when_classifier_scores_both_as_ai():
+    # Real case (file 1, "Champ"): diarization correctly separates bot and human,
+    # but the acoustic classifier wrongly scores BOTH speakers as AI. Content-based
+    # bot self-identification must still correctly resolve this.
+    turns = [
+        Turn(speaker="SPEAKER_00", start=0.0, end=6.0,
+             text="Hello, I'm Champ, your AI powered assistant, here to help you."),
+        Turn(speaker="SPEAKER_01", start=30.0, end=33.0, text="Yeah, I'm done."),
+    ]
+    scores = {"SPEAKER_00": 0.995, "SPEAKER_01": 0.918}  # both "AI" per classifier
+    customer, human_speakers, used_heuristic = decide_customer_speaker(turns, scores, 0.5, None)
+    assert customer == "SPEAKER_01"
+    assert used_heuristic is False
+
+
+def test_decide_customer_speaker_content_wins_even_when_classifier_scores_both_as_human():
+    # Real case (file 4, "Benjamin"): classifier scored both speakers as human, and
+    # the second-speaker-to-talk heuristic alone picked the wrong one (the bot's
+    # later turn). Content-based detection must override both.
+    turns = [
+        Turn(speaker="SPEAKER_00", start=0.0, end=5.0,
+             text="Hello there, this is Benjamin a virtual agent from oid calling on a recorded line."),
+        Turn(speaker="SPEAKER_01", start=5.5, end=6.5, text="Yeah, this is Bess, right?"),
+        Turn(speaker="SPEAKER_00", start=7.0, end=9.0, text="Just checking are you the policy owner?"),
+        Turn(speaker="SPEAKER_01", start=9.5, end=10.0, text="Yes, I am."),
+    ]
+    scores = {"SPEAKER_00": 0.14, "SPEAKER_01": 0.01}  # both "human" per classifier
+    customer, human_speakers, used_heuristic = decide_customer_speaker(turns, scores, 0.5, None)
+    assert customer == "SPEAKER_01"
+    assert used_heuristic is False
+
+
+def test_decide_customer_speaker_falls_back_to_heuristic_without_content_signal():
+    turns = [
+        Turn(speaker="SPEAKER_00", start=0.0, end=1.0, text="Hi, thanks for calling."),
+        Turn(speaker="SPEAKER_01", start=1.5, end=2.5, text="I have an issue."),
+    ]
+    scores = {"SPEAKER_00": 0.3, "SPEAKER_01": 0.3}  # both pass as human, indistinguishable
+    customer, human_speakers, used_heuristic = decide_customer_speaker(turns, scores, 0.5, None)
+    assert customer == "SPEAKER_01"
+    assert used_heuristic is True
+
+
+def test_decide_customer_speaker_single_overall_speaker_still_wins():
+    turns = [Turn(speaker="SPEAKER_00", start=0.0, end=1.0, text="I'd like to speak to a team member.")]
+    scores = {"SPEAKER_00": 0.94}
+    customer, human_speakers, used_heuristic = decide_customer_speaker(turns, scores, 0.5, None)
+    assert customer == "SPEAKER_00"
+
+
+def test_decide_customer_speaker_forced_override_always_wins():
+    turns = [
+        Turn(speaker="SPEAKER_00", start=0.0, end=1.0, text="I'm a virtual assistant."),
+        Turn(speaker="SPEAKER_01", start=1.0, end=2.0, text="Hi."),
+    ]
+    scores = {"SPEAKER_00": 0.1, "SPEAKER_01": 0.9}
+    customer, human_speakers, used_heuristic = decide_customer_speaker(turns, scores, 0.5, "SPEAKER_00")
+    assert customer == "SPEAKER_00"
 
 
 def test_pick_customer_speaker_single_speaker_wins_even_if_scored_as_ai():

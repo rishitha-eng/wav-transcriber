@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -284,7 +285,14 @@ def _transcribe_from_channels(
 
 def diarize(wav_path: str, hf_token: str) -> list[tuple[float, float, str]]:
     pipeline = _load_diarization_pipeline(hf_token)
-    output = pipeline(wav_path)
+    # min_speakers=2: this path only runs for mono/mixed-down audio, which in this
+    # tool's domain (bot-or-agent talking to a customer) almost always has two
+    # speakers. Confirmed safe on real audio: a genuinely single-speaker file still
+    # correctly comes back as 1 speaker (pyannote warns and ignores the hint rather
+    # than hallucinating a second speaker) — but on a real bot+human call, it
+    # recovers a brief human reply that otherwise gets swallowed into the bot's
+    # cluster because it's fully overlapped by a longer competing segment.
+    output = pipeline(wav_path, min_speakers=2)
     # pyannote.audio 4.x wraps the Annotation in a DiarizeOutput; older versions
     # returned the Annotation directly. Handle both.
     annotation = getattr(output, "speaker_diarization", output)
@@ -440,6 +448,94 @@ def pick_second_speaker_as_customer(turns: list[Turn], human_speakers: list[str]
     return max(human_speakers, key=lambda s: first_turn_time[s])
 
 
+# Voice bots in this domain routinely self-identify in speech — often a compliance
+# requirement — e.g. "I'm Alex, Heartland's virtual support assistant" or "this is
+# Benjamin, a virtual agent from...". Confirmed on real test recordings: this text
+# signal is far more reliable than acoustically classifying AI vs. human voice on
+# degraded/narrowband telephony audio, where the classifier has been wrong in both
+# directions (misscoring known-human audio as AI, and vice versa).
+# This list is inherently incomplete — every bot deployment can use a different
+# self-description ("Champ", "Alex", "Benjamin", "Riya, your service champion"...)
+# in any language. Confirmed gap: a Hindi call was missed entirely because these
+# were English-only, causing the pipeline to fall back to the acoustic classifier,
+# which then labeled the bot as the customer. Add new phrases here as they're found
+# — this is meant to grow over time, not be exhaustive on day one.
+BOT_SELF_ID_PHRASES = [
+    # English
+    r"virtual\s+(?:\w+\s+){0,2}(?:assistant|agent)",
+    r"ai[- ]powered assistant",
+    r"ai assistant",
+    r"automated assistant",
+    r"digital assistant",
+    r"i'?m an ai\b",
+    r"i am an ai\b",
+    r"service champion",  # seen code-switched into non-English calls too
+    # Hindi (Devanagari)
+    r"वर्चुअल\s+(असिस्टेंट|एजेंट)",
+    r"एआई\s+असिस्टेंट",
+    r"आपक[ीा]\s+सहायक",
+]
+BOT_SELF_ID_PATTERN = re.compile("|".join(f"(?:{p})" for p in BOT_SELF_ID_PHRASES), re.IGNORECASE)
+
+
+def detect_bot_by_self_identification(turns: list[Turn]) -> str | None:
+    """If exactly one speaker's own words contain a clear AI/virtual-assistant
+    self-identification, return that speaker id. None if zero or more than one
+    speaker matches (stay conservative — only act on an unambiguous signal)."""
+    text_by_speaker: dict[str, str] = {}
+    for t in turns:
+        text_by_speaker[t.speaker] = text_by_speaker.get(t.speaker, "") + " " + t.text
+
+    matches = [speaker for speaker, text in text_by_speaker.items() if BOT_SELF_ID_PATTERN.search(text)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def decide_customer_speaker(
+    turns: list[Turn],
+    speaker_ai_probability: dict[str, float],
+    ai_threshold: float,
+    forced_customer: str | None,
+) -> tuple[str | None, list[str], bool]:
+    """
+    Single decision point for "who is the customer", in priority order:
+      1. forced_customer, if given — always wins.
+      2. Content-based bot self-identification: if exactly one speaker's words
+         clearly self-identify as an AI/virtual assistant, the other speaker (if
+         there's exactly one other) is the customer. Most reliable signal for this
+         domain — see BOT_SELF_ID_PATTERN.
+      3. Acoustic AI-voice classifier: exactly one speaker scored below ai_threshold.
+      4. Two speakers, classifier inconsistent/ambiguous: assume whoever spoke
+         second is the customer (the other usually greets first).
+      5. Exactly one speaker in the whole recording: picked regardless of the
+         classifier's verdict (see pick_customer_speaker's docstring).
+
+    Returns (customer_speaker, human_speakers, used_second_speaker_heuristic).
+    """
+    human_speakers = [s for s, p in speaker_ai_probability.items() if p < ai_threshold]
+
+    if forced_customer:
+        return forced_customer, human_speakers, False
+
+    bot_by_content = detect_bot_by_self_identification(turns)
+    if bot_by_content and bot_by_content in speaker_ai_probability:
+        remaining = [s for s in speaker_ai_probability if s != bot_by_content]
+        if len(remaining) == 1:
+            return remaining[0], human_speakers, False
+
+    if len(human_speakers) == 1:
+        return human_speakers[0], human_speakers, False
+
+    if len(human_speakers) == 2:
+        heuristic_pick = pick_second_speaker_as_customer(turns, human_speakers)
+        if heuristic_pick:
+            return heuristic_pick, human_speakers, True
+
+    if len(speaker_ai_probability) == 1:
+        return next(iter(speaker_ai_probability)), human_speakers, False
+
+    return None, human_speakers, False
+
+
 def export_speaker_chunks(
     source_audio: np.ndarray,
     sr: int,
@@ -541,16 +637,9 @@ def _finalize_result(
     stem = wav_path_p.stem
     turns = sorted(turns, key=lambda t: t.start)
 
-    chosen_customer, human_speakers = pick_customer_speaker(
-        speaker_ai_probability, ai_threshold=ai_threshold, forced_customer=customer_speaker
+    chosen_customer, human_speakers, used_second_speaker_heuristic = decide_customer_speaker(
+        turns, speaker_ai_probability, ai_threshold, customer_speaker
     )
-
-    used_second_speaker_heuristic = False
-    if not chosen_customer and len(human_speakers) > 1:
-        heuristic_pick = pick_second_speaker_as_customer(turns, human_speakers)
-        if heuristic_pick:
-            chosen_customer = heuristic_pick
-            used_second_speaker_heuristic = True
 
     full_transcript_path = out_dir_path / f"{stem}_full_transcript.txt"
     with open(full_transcript_path, "w") as f:
