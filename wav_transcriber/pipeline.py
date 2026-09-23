@@ -119,11 +119,15 @@ def _run_whisper(model, audio) -> tuple[list[dict], str | None]:
     """Run faster-whisper and normalize its segment generator into the list-of-dict
     shape the rest of the pipeline expects. vad_filter uses a built-in speech
     detector so quiet/short utterances are caught rather than silently dropped, and
-    a short min_silence_duration keeps turn boundaries responsive to real pauses."""
+    a short min_silence_duration keeps turn boundaries responsive to real pauses.
+    condition_on_previous_text=False avoids a known Whisper failure mode on noisy
+    telephony audio where a poorly-decoded segment biases later segments into a
+    repetition loop (e.g. "Clean Intimation Clean Intimation Clean Intimation...")."""
     segments_iter, info = model.transcribe(
         audio,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 400},
+        condition_on_previous_text=False,
     )
     segments = [{"start": seg.start, "end": seg.end, "text": seg.text} for seg in segments_iter]
     return segments, info.language
@@ -401,6 +405,13 @@ def pick_customer_speaker(
     If exactly one human speaker is found, it's auto-picked as the customer.
     If more than one, customer_speaker is None unless forced_customer is set —
     caller should re-run with an explicit choice.
+
+    If diarization found exactly one speaker in the whole recording, they're picked
+    as the customer regardless of the AI-voice classifier's verdict. The classifier
+    is known-unreliable on narrowband/telephony audio (confirmed: genuinely human
+    audio has scored >0.9 "AI" on real test files) — when there's only one voice in
+    the entire file, silently dropping it to zero output because of one shaky
+    classifier score is worse than trusting that the sole speaker is the one we want.
     """
     human_speakers = [s for s, p in speaker_ai_probability.items() if p < ai_threshold]
 
@@ -408,6 +419,8 @@ def pick_customer_speaker(
         return forced_customer, human_speakers
     if len(human_speakers) == 1:
         return human_speakers[0], human_speakers
+    if len(speaker_ai_probability) == 1:
+        return next(iter(speaker_ai_probability)), human_speakers
     return None, human_speakers
 
 

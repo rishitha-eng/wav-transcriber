@@ -130,8 +130,20 @@ def test_translate_sentences_calls_model_with_correct_codes():
     assert fake_tokenizer.requested_bos_token == "hin_Deva"
 
 
-def test_pick_customer_speaker_no_humans():
+def test_pick_customer_speaker_single_speaker_wins_even_if_scored_as_ai():
+    # A lone speaker in the whole recording is picked as the customer regardless of
+    # the AI-voice classifier's verdict — the classifier is known-unreliable on
+    # narrowband audio, and dropping the only voice in the file is worse than
+    # trusting it's the one we want (confirmed with real, verified-human test audio
+    # that the classifier scored >0.9 "AI").
     scores = {"SPEAKER_00": 0.95}
+    customer, humans = pick_customer_speaker(scores, ai_threshold=0.5)
+    assert customer == "SPEAKER_00"
+    assert humans == []
+
+
+def test_pick_customer_speaker_no_humans_with_multiple_speakers():
+    scores = {"SPEAKER_00": 0.95, "SPEAKER_01": 0.99}
     customer, humans = pick_customer_speaker(scores, ai_threshold=0.5)
     assert customer is None
     assert humans == []
