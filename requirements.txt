@@ -6,6 +6,7 @@ sentencepiece
 librosa
 soundfile
 gradio
+python-docx
 torch
 numpy
 
