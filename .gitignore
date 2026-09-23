@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.gradio/
+*.egg-info/
+
+# Generated outputs — audio, transcripts, and ingestion results should never be committed
+*.wav
+ingestion_output/
+ingestion/config.json
+*_full_transcript.txt
+*_customer_sentences.txt
+*_chunks/
+*_chunks_manifest.csv

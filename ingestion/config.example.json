@@ -1,0 +1,41 @@
+{
+  "_comment": "Copy this file to config.json and fill in real values before running inside the Yellow.ai network. Nothing here is a live credential.",
+
+  "opensearch": {
+    "host": "your-opensearch-host.internal",
+    "port": 9200,
+    "use_ssl": true,
+    "verify_certs": true,
+    "auth": {
+      "method": "basic",
+      "username": "",
+      "password": ""
+    },
+    "index": "voice-vss-logs-*",
+    "fields": {
+      "callsid": "callsid",
+      "stt_language": "sttLanguage",
+      "stt_confidence": "sttConfidence",
+      "region": "region",
+      "recording_link": "recordingLink",
+      "timestamp": "@timestamp"
+    }
+  },
+
+  "azure": {
+    "_comment": "If recording_link in the logs is already a full downloadable URL (SAS token included), set recording_link_is_direct_url=true and leave connection_string empty. Otherwise set it to a blob path and fill in connection_string + container_name.",
+    "recording_link_is_direct_url": true,
+    "connection_string": "",
+    "container_name": ""
+  },
+
+  "selection": {
+    "start_time": "2026-09-15T00:00:00Z",
+    "end_time": "2026-09-22T00:00:00Z",
+    "regions": ["r0", "r2", "r3", "r4"],
+    "confidence_buckets": [[0.0, 0.5], [0.5, 1.01]],
+    "samples_per_region_language_bucket": 5
+  },
+
+  "output_dir": "./ingestion_output"
+}

@@ -1,0 +1,18 @@
+faster-whisper
+pyannote.audio
+nltk
+transformers
+sentencepiece
+librosa
+soundfile
+gradio
+torch
+numpy
+
+# testing
+pytest
+
+# ingestion/ pipeline only (optional)
+opensearch-py
+azure-storage-blob
+requests
