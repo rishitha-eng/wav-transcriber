@@ -75,4 +75,4 @@ with gr.Blocks(title="Customer Voice to Text") as demo:
     target_language.change(run_pipeline, inputs=inputs, outputs=sentences_output)
 
 if __name__ == "__main__":
-    demo.launch(server_name="127.0.0.1", server_port=7860)
+    demo.launch(server_name="127.0.0.1", server_port=7860, share=True)
